@@ -1,0 +1,7 @@
+torch==2.11.0
+transformers==5.9.0
+tokenizers==0.22.2
+safetensors==0.7.0
+pyarrow==26.0.0
+numpy==2.3.5
+pytest==9.1.1
