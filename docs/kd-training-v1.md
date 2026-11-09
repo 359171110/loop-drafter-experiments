@@ -24,3 +24,15 @@ python -m scripts.loop_drafter.run_kd_experiment \
 启动器等待指定卡连续两次空闲并持有项目 GPU lease，不终止其他任务。训练完成后自动在同一 GPU 上按请求轮换测量 AR、原 v1 trajectory CE、新版 KD；core 为 GSM8K 300 / HumanEval 164 / ShareGPT 300，ARC-Challenge 300 独立报告，无 MBPP。保持冻结 input IDs、FP32 四轮 target、BF16 drafter、batch 1、greedy、最多生成 256 tokens、输入上限 2048。记录首 child 接收率、平均接受长度、速度及 token 一致性。GPU 监控记录若发现外部进程，汇总结果标为共享环境诊断。
 
 当前比较用于判断整版是否有效。损失、权重和覆盖度的独立消融留待整版取得收益之后。
+
+训练执行优化：KD 默认将每条轨迹的 token 和隐藏状态传到 GPU 一次，再在 GPU 上取历史窗口，避免每个 microbatch 在 CPU 展开重叠窗口并重复传输。实际训练在第 4,600 步保存断点后切换该管道，并将物理 microbatch 提到 128；模型、优化器、请求顺序、anchor、全局 batch 和学习率继续原进度。运行目录保留切换前源码快照及变更记录。
+
+同一断点、同四条请求的单卡前后向测量（不含优化器和双卡通信，预热后 3 次中位数）：原 CPU 管道 microbatch 64 为 0.803 秒，GPU 管道 64 为 0.455 秒，GPU 管道 128 为 0.158 秒。该测量不能直接代表双卡完整训练加速比。输入张量逐元素一致；loss 从 2.129929232 变为 2.129929318。GPU 管道 128 的梯度相对 L2 差为 0.383%，原路径重复运行自身为 0.092%，因此不保证浮点逐位复现。峰值分配显存约 3.93 GiB。边界批次、teacher 对齐、跨卡归一化、断点恢复共 5 项测试通过。
+
+在新运行启动前，可在运行目录写入 `training_execution.json`，从指定步启用较大 microbatch；新实验从头使用可设 `from_step: 0`：
+
+```json
+{"schema":"loop_training_execution_v1","microbatch":128,"from_step":4600}
+```
+
+恢复既有实验时，代码快照需要保留并登记这次执行变更；不要直接覆盖旧快照。完整小规模测量见 [原始记录](kd-device-staging-benchmark.json)。

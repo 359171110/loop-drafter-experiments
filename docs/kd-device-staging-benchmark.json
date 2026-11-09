@@ -1,0 +1,56 @@
+{
+  "checkpoint_step": 4600,
+  "prepare_requests_seconds": 0.0036882953718304634,
+  "requests": 4,
+  "timings": {
+    "reference64": {
+      "median_seconds": 0.8025079211220145,
+      "seconds": [
+        1.6136254034936428,
+        0.7021756954491138,
+        0.8025079211220145,
+        0.809837662614882
+      ],
+      "loss": 2.1299292322415027
+    },
+    "repeat_reference64": {
+      "median_seconds": 0.8021130487322807,
+      "seconds": [
+        0.825515597127378,
+        0.8112743347883224,
+        0.8021130487322807,
+        0.7726278621703386
+      ],
+      "loss": 2.1299292322415027,
+      "gradient_relative_l2": 0.0009238482310076958,
+      "gradient_bitwise_equal": false
+    },
+    "staged64": {
+      "median_seconds": 0.45527595933526754,
+      "seconds": [
+        0.41039199847728014,
+        0.42931212205439806,
+        0.45527595933526754,
+        0.4680118281394243
+      ],
+      "loss": 2.1299292322415027,
+      "gradient_relative_l2": 0.0009204117717110252,
+      "gradient_bitwise_equal": false
+    },
+    "staged128": {
+      "median_seconds": 0.15814244654029608,
+      "seconds": [
+        0.501290475949645,
+        0.13365592621266842,
+        0.15814244654029608,
+        0.17837271932512522
+      ],
+      "loss": 2.1299293176451726,
+      "gradient_relative_l2": 0.003828403809356577,
+      "gradient_bitwise_equal": false
+    }
+  },
+  "input_tensors_bitwise_equal": true,
+  "peak_allocated": 4223299584,
+  "counts_equal": true
+}

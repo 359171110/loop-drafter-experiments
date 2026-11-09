@@ -40,6 +40,15 @@ def worker(rank, rendezvous, job_path):
 
 
 class KDTrainingTests(unittest.TestCase):
+    def test_device_batch_matches_reference_at_boundaries(self):
+        record = dict(token_ids=torch.arange(13), round_hidden=torch.randn(13, 4, 8), prompt_length=1)
+        for roots in ([0, 1, 9, 10], [2, 6, 9]):
+            expected = kd.make_loop_memory_batch(record, roots, 5, 6, 'cpu')
+            actual = kd.device_batch(kd.stage_record(record, 'cpu'), roots, 5, 6)
+            self.assertEqual(set(expected), set(actual))
+            for key in expected:
+                self.assertTrue(torch.equal(expected[key], actual[key]), key)
+
     def setUp(self):
         self.f = fixtures.LoopMemoryTrainingTests(); self.f.setUp()
         self.settings = replace(self.f.settings, role='baseline', epochs=2)

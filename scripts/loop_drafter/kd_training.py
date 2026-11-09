@@ -57,6 +57,26 @@ def weighted_count(requests, weights):
                for _, record, roots in requests for root in roots)
 
 
+def stage_record(record, device):
+    return dict(record, token_ids=record['token_ids'].to(device),
+                round_hidden=record['round_hidden'].to(device))
+
+
+def device_batch(record, roots, depth, window):
+    ids, hidden = record['token_ids'], record['round_hidden']
+    roots = torch.as_tensor(roots, device=ids.device, dtype=torch.long)
+    columns = roots[:, None] + 2 + torch.arange(depth, device=ids.device)[None]
+    valid = columns < len(ids)
+    labels = ids[columns.clamp_max(len(ids)-1)].masked_fill(~valid, -100)
+    bonus = ids[roots+1]
+    previous = torch.cat((bonus[:,None], labels[:,:-1].clamp_min(0)), dim=1)
+    positions = roots[:,None] - window + 1 + torch.arange(window, device=ids.device)[None]
+    mask = positions >= 0
+    history = hidden[positions.clamp_min(0)].masked_fill(~mask[...,None,None], 0)
+    return dict(taps=hidden[roots], bonus=bonus, previous=previous, labels=labels, valid=valid,
+                history=history, history_mask=mask)
+
+
 @torch.no_grad()
 def teacher_buckets(record, roots, depth, head, topk):
     # Child d=0 is token[root+2]; its teacher state is hidden[root+1].
@@ -65,7 +85,7 @@ def teacher_buckets(record, roots, depth, head, topk):
     positions = roots[:, None] + 1 + torch.arange(depth)[None]
     positions = positions.clamp_max(len(record['round_hidden']) - 1)
     unique, inverse = positions.flatten().unique(sorted=True, return_inverse=True)
-    hidden = record['round_hidden'][unique, -1].to(device=head.device, dtype=torch.float32)
+    hidden = record['round_hidden'][unique.to(record['round_hidden'].device), -1].to(device=head.device, dtype=torch.float32)
     with torch.autocast(head.device.type, enabled=False):
         scores = F.linear(hidden, head.float())
         if not 0 < topk < scores.shape[-1]:
@@ -86,7 +106,7 @@ def bucket_kl(scores, ids, teacher_logp):
     return (teacher_logp.exp() * (teacher_logp - student_logp)).sum(-1)
 
 
-def accumulate_gradients(model, requests, microbatch, device, objective, denominator=None):
+def accumulate_gradients(model, requests, microbatch, device, objective, denominator=None, *, device_staging=True):
     depth = model.config.depth
     weights = objective['depth_weights']
     local_weight = weighted_count(requests, weights)
@@ -98,10 +118,12 @@ def accumulate_gradients(model, requests, microbatch, device, objective, denomin
     sums = torch.zeros(3 + 3 * depth, dtype=torch.float64, device=device)
     for _, record, roots in requests:
         validate_record(record, model.config)
+        staged = stage_record(record, device) if device_staging else record
         for start in range(0, len(roots), microbatch):
             selected = roots[start:start + microbatch]
-            batch = make_loop_memory_batch(record, selected, depth, model.config.window, device)
-            ids, logp = teacher_buckets(record, selected, depth, model.shared_lm_head, objective['topk'])
+            batch = (device_batch(staged, selected, depth, model.config.window) if device_staging else
+                     make_loop_memory_batch(record, selected, depth, model.config.window, device))
+            ids, logp = teacher_buckets(staged, selected, depth, model.shared_lm_head, objective['topk'])
             with amp_context(device):
                 logits = model.forward_batch(batch)
             per_label = bucket_kl(logits, ids, logp)
@@ -122,7 +144,7 @@ def accumulate_gradients(model, requests, microbatch, device, objective, denomin
     values = sums.cpu().tolist()
     labels = [int(x) for x in values[3:3 + depth]]
     correct = [int(x) for x in values[3 + depth:3 + 2 * depth]]
-    return dict(loss=values[0] / max(local_weight, 1), kd_sum=values[0], weighted_ce_sum=values[2],
+    return dict(data_pipeline='device_staging_v1' if device_staging else 'cpu_gather_v1', loss=values[0] / max(local_weight, 1), kd_sum=values[0], weighted_ce_sum=values[2],
                 weighted_labels=local_weight, ce=values[1] / max(sum(labels), 1),
                 nll_sum=values[1], valid_labels=sum(labels), labels_by_depth=labels, correct_by_depth=correct,
                 kd_sum_by_depth=values[3 + 2 * depth:], top1_by_depth=[c / max(n, 1) for c, n in zip(correct, labels)],
@@ -151,6 +173,7 @@ def synchronized_gradients(model, requests, microbatch, device, objective):
     result = merge_statistics(parts)
     for key in ('kd_sum', 'weighted_ce_sum', 'weighted_labels'):
         result[key] = sum(p[key] for p in parts)
+    result['data_pipeline'] = local['data_pipeline']
     result['loss'] = result['kd_sum'] / result['weighted_labels']
     result['ce'] = result['nll_sum'] / result['valid_labels']
     result['kd_sum_by_depth'] = [sum(p['kd_sum_by_depth'][d] for p in parts) for d in range(model.config.depth)]
