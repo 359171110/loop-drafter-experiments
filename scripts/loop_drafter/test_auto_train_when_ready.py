@@ -65,3 +65,10 @@ def test_supervisor_waits_for_capture_then_stable_gpu_and_launches_training_only
     assert states[-1] == 'training_complete'
     assert len(commands) == 2
     assert '--execute' not in commands[0]
+
+
+def test_resume_preserves_registered_gpu_assignment(tmp_path):
+    assert watcher.registered_gpus(tmp_path) is None
+    (tmp_path / 'status.json').write_text('{"jobs": {"none": {"state": "interrupted"}}}')
+    (tmp_path / 'execution.json').write_text('{"gpus": ["0", "2", "3", "4"]}')
+    assert watcher.registered_gpus(tmp_path) == ['0', '2', '3', '4']

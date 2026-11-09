@@ -74,6 +74,17 @@ def validate_initialization(payload, from_scratch):
         raise ValueError("legacy resume checkpoint is missing its SSD parent identity")
 
 
+def execution_microbatch(settings, plan, completed_steps):
+    if plan is None:
+        return settings.microbatch
+    if (set(plan) != {'schema', 'microbatch', 'from_step'}
+            or plan['schema'] != 'loop_training_execution_v1'
+            or type(plan['microbatch']) is not int or plan['microbatch'] < 1
+            or type(plan['from_step']) is not int or plan['from_step'] < 0):
+        raise ValueError('invalid microbatch execution schedule')
+    return plan['microbatch'] if completed_steps >= plan['from_step'] else settings.microbatch
+
+
 def accumulate_gradients(model, requests, microbatch, device, denominator=None):
     """Accumulate CE sums divided by one global count of valid child labels."""
     depth = model.config.depth
@@ -130,7 +141,7 @@ def synchronized_gradients(model, requests, microbatch, device):
 
 
 def save_training_checkpoint(path, model, optimizer, cursor, settings, entries, frozen_io,
-                             sampling_epoch_offset, parent, from_scratch=False, initialization=None):
+                             sampling_epoch_offset, parent, from_scratch=False, initialization=None, execution_plan=None):
     rank, world_size = distributed_context()
     device = next(model.parameters()).device
     rng = dict(torch_rng=torch.get_rng_state(), python_rng=random.getstate())
@@ -143,7 +154,7 @@ def save_training_checkpoint(path, model, optimizer, cursor, settings, entries, 
     if rank == 0:
         payload = dict(schema=SCHEMA, protocol=SCRATCH_PROTOCOL if from_scratch else PROTOCOL,
                        from_scratch=from_scratch, run_directory=str(Path(path).parent.resolve()),
-                       initialization=initialization,
+                       initialization=initialization, execution_plan=execution_plan,
                        config=model.config.dict(),
                        model=model.state_dict(), optimizer=optimizer.state_dict(), cursor=dict(cursor),
                        settings=asdict(settings), data_index=entries,
@@ -195,7 +206,7 @@ def restore_training_state(payload, optimizer, settings, entries, device, sampli
 
 def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=None,
                  sampling_epoch_offset=None, parent=None, save_every=50, stop_after_steps=0,
-                 from_scratch=False):
+                 from_scratch=False, execution_plan=None):
     """Train a randomly initialized or legacy arm from its next committed update."""
     if sampling_epoch_offset is None:
         sampling_epoch_offset = 0 if from_scratch else 4
@@ -208,6 +219,15 @@ def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=Non
         raise ValueError("from-scratch training must not have a drafter parent")
     if not from_scratch and parent is None and resume_payload is None:
         raise ValueError("loop memory training requires a shared SSD baseline parent")
+    if resume_payload is not None:
+        prior_plan = resume_payload.get('execution_plan')
+        if execution_plan is None:
+            execution_plan = prior_plan
+        elif prior_plan is not None and execution_plan != prior_plan:
+            raise ValueError('resume microbatch execution schedule changed')
+        elif prior_plan is None and resume_payload['cursor']['step'] > execution_plan['from_step']:
+            raise ValueError('cannot introduce an execution schedule retroactively')
+    execution_microbatch(settings, execution_plan, 0)
     rank, world_size = distributed_context()
     primary = rank == 0
     if world_size not in (1, 2, 4) or world_size > settings.requests_per_update:
@@ -267,7 +287,7 @@ def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=Non
 
     def save(name):
         save_training_checkpoint(out / name, model, optimizer, cursor, settings, entries,
-                                 frozen_io, sampling_epoch_offset, parent, from_scratch, initialization)
+                                 frozen_io, sampling_epoch_offset, parent, from_scratch, initialization, execution_plan)
 
     if resume_payload is None:
         save("initial.pt")
@@ -293,7 +313,8 @@ def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=Non
         for group in optimizer.param_groups:
             group["lr"] = lr
         tick = time.monotonic()
-        stats = synchronized_gradients(model, requests, settings.microbatch, device)
+        physical_microbatch = execution_microbatch(settings, execution_plan, cursor["step"])
+        stats = synchronized_gradients(model, requests, physical_microbatch, device)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip, error_if_nonfinite=True)
         optimizer.step()
         end = start + len(indices)
@@ -305,6 +326,7 @@ def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=Non
                       total_labels=cursor["total_labels"] + stats["valid_labels"])
         row = dict(event="update", step=cursor["step"], epoch=epoch + 1, sampling_epoch=sampling_epoch,
                    requests=len(indices), request_offset=start, lr=lr, grad_norm=float(grad_norm),
+                   execution_microbatch=physical_microbatch,
                    world_size=world_size, requests_by_rank=[len(shard_indices(indices, i, world_size))
                                                           for i in range(world_size)],
                    update_seconds=time.monotonic() - tick, **stats)
@@ -450,10 +472,12 @@ def _run(args, settings, device):
         entries = message[0]
     if baseline is not None and baseline.get("data_index") != entries:
         raise ValueError("all arms must use the same ordered data as their SSD baseline")
+    execution_path = Path(args.out).parent / 'training_execution.json'
+    execution_plan = json.loads(execution_path.read_text()) if execution_path.is_file() else None
     return train_epochs(model, entries, settings, args.out, args.frozen_io, resume_payload=payload,
                         sampling_epoch_offset=args.sampling_epoch_offset, parent=parent,
                         save_every=args.save_every, stop_after_steps=args.stop_after_steps,
-                        from_scratch=args.from_scratch)
+                        from_scratch=args.from_scratch, execution_plan=execution_plan)
 
 
 if __name__ == "__main__":

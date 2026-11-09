@@ -108,3 +108,5 @@ python -m scripts.loop_drafter.auto_train_when_ready \
 - `scripts/fest_hybrid`、`scripts/fest_hybrid_prefix_tree`：主干依赖。
 
 采集执行优化的实测结果见 [测速记录](docs/capture-performance.md)。
+
+本轮 v1 已登记统一的训练执行优化：完成 6,400 步后，四个方案将物理 microbatch 从 16 切换为 64；全局更新预算不变。新服务器复现需在开训前复制 [执行调度文件](scripts/loop_drafter/training_execution_v1.json)，详见 [训练执行说明与测速](docs/training-execution.md)。

@@ -66,6 +66,13 @@ def choose_gpus(eligible):
     return eligible[:count]
 
 
+def registered_gpus(run):
+    status, execution = run / 'status.json', run / 'execution.json'
+    if status.is_file() and json.loads(status.read_text()).get('jobs'):
+        return json.loads(execution.read_text())['gpus']
+    return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--protocol', type=Path, default=Path(__file__).with_name('data_protocol_v2.json'))
@@ -105,7 +112,7 @@ def main(argv=None):
                 if not validated:
                     write_status(state_file, state='validating_capture', policy=policy)
                     with (run / 'auto_train_prepare.log').open('a') as log:
-                        subprocess.run(base + ['--gpus', '0'], cwd=repo, stdout=log, stderr=subprocess.STDOUT, check=True)
+                        subprocess.run(base + ['--gpus', ','.join(registered_gpus(run) or ['0'])], cwd=repo, stdout=log, stderr=subprocess.STDOUT, check=True)
                     prepared = json.loads((run / 'preparation.json').read_text())
                     if prepared['state'] != 'prepared':
                         raise ValueError('complete capture did not pass launcher validation')
@@ -118,7 +125,9 @@ def main(argv=None):
                     time.sleep(args.poll_seconds)
                     continue
                 idle = eligible_gpus(inventory)
-                selected = choose_gpus([gpu for gpu in idle if gpu in previous_idle])
+                stable = [gpu for gpu in idle if gpu in previous_idle]
+                registered = registered_gpus(run)
+                selected = (registered if set(registered).issubset(stable) else []) if registered else choose_gpus(stable)
                 previous_idle = set(idle)
                 if not selected:
                     write_status(state_file, state='waiting_for_gpus', policy=policy, inventory=inventory,

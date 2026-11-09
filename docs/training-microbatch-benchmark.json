@@ -1,0 +1,66 @@
+[
+  {
+    "mode": "none",
+    "checkpoint_step": 5850,
+    "seconds": {
+      "reference": 1.009239696431905,
+      "micro64": 0.5389248724095523
+    },
+    "speedup": 1.8726908853168316,
+    "stats_identical": false,
+    "gradients_bitwise_identical": false,
+    "gradient_max_abs": 0.0012707710266113281,
+    "loss_reference": 2.511863938497674,
+    "loss_micro64": 2.5118639657347033,
+    "gradient_relative_l2": 0.003270551590662742,
+    "peak_allocated": 2235453952
+  },
+  {
+    "mode": "final",
+    "checkpoint_step": 5650,
+    "seconds": {
+      "reference": 1.305365985725075,
+      "micro64": 0.4426053077913821
+    },
+    "speedup": 2.9492777486987283,
+    "stats_identical": false,
+    "gradients_bitwise_identical": false,
+    "gradient_max_abs": 0.001224517822265625,
+    "loss_reference": 1.9377961022578098,
+    "loss_micro64": 1.9377872752099308,
+    "gradient_relative_l2": 0.003177498499531715,
+    "peak_allocated": 2278885376
+  },
+  {
+    "mode": "final_capacity",
+    "checkpoint_step": 5800,
+    "seconds": {
+      "reference": 1.530953963752836,
+      "micro64": 0.6611532610841095
+    },
+    "speedup": 2.3155810518766744,
+    "stats_identical": false,
+    "gradients_bitwise_identical": false,
+    "gradient_max_abs": 0.0013415813446044922,
+    "loss_reference": 2.1143107471363645,
+    "loss_micro64": 2.1143107045932723,
+    "gradient_relative_l2": 0.0029276084160049145,
+    "peak_allocated": 2461850112
+  },
+  {
+    "mode": "trajectory",
+    "checkpoint_step": 6200,
+    "seconds": {
+      "reference": 1.4364020270295441,
+      "micro64": 0.5647991811856627
+    },
+    "speedup": 2.5432084090741007,
+    "stats_identical": false,
+    "gradients_bitwise_identical": false,
+    "gradient_max_abs": 0.001239776611328125,
+    "loss_reference": 2.230328092579177,
+    "loss_micro64": 2.23032807893474,
+    "gradient_relative_l2": 0.0033307878981798113,
+    "peak_allocated": 2457270784
+  }
+]

@@ -1,0 +1,5 @@
+{
+  "schema": "loop_training_execution_v1",
+  "microbatch": 64,
+  "from_step": 6400
+}

@@ -219,7 +219,7 @@ def checkpoint_training_identity(payload, config, frozen_io):
                 or any(c not in "0123456789abcdef" for c in fingerprint)):
             raise ValueError("scratch initialization seed or state fingerprint is invalid")
     return {"protocol": protocol, "from_scratch": scratch, "parent": parent, "initialization": initialization,
-            "settings": settings, "sampling_epoch_offset": offset, "cursor": cursor,
+            "settings": settings, "execution_plan": payload.get("execution_plan"), "sampling_epoch_offset": offset, "cursor": cursor,
             "config_except_memory_mode": {k: v for k, v in config.items() if k != "memory_mode"},
             "training_requests": len(entries),
             "data_index_sha256": hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
@@ -234,6 +234,7 @@ def require_matching_training_identity(reference, actual):
         "parent": "same SSD baseline parent",
         "initialization": "same scratch initialization identity",
         "settings": "same training settings and budget",
+        "execution_plan": "same microbatch execution schedule",
         "config_except_memory_mode": "same drafter configuration except memory_mode",
         "training_requests": "same ordered training data",
         "data_index_sha256": "same ordered training data",
