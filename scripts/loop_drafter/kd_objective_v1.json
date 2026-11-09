@@ -1,0 +1,9 @@
+{
+  "schema": "loop_kd_objective_v1",
+  "loss": "kd_only",
+  "temperature": 1.0,
+  "topk": 128,
+  "depth_weights": [2, 1, 1, 1, 1],
+  "anchor_sampling": "seeded_cyclic_without_replacement",
+  "teacher": "cached_bf16_final_round_fp32_head"
+}

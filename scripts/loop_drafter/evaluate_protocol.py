@@ -53,6 +53,9 @@ def aggregate(records):
                        verification_cycles=len(cycles),
                        mean_committed_tokens_per_verify=sum(c["committed_tokens"] for c in cycles) / len(cycles) if cycles else None,
                        mean_accepted_children_per_verify=sum(c["accepted_children"] for c in cycles) / len(cycles) if cycles else None)
+            eligible = [c for c in cycles if c.get('proposed_children', 0) >= 1]
+            row['first_child_acceptance_rate'] = (sum(c['accepted_children'] >= 1 for c in eligible) / len(eligible)
+                                                   if eligible else None)
             result.append(row)
     return result
 

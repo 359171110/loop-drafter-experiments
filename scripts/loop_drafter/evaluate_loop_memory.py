@@ -16,6 +16,7 @@ from .capture import prompt_ids, read_jsonl
 from .capture_protocol import _journal as read_result_journal
 from .evaluate import decode_ar, decode_speculative, sync
 from .train import amp_context
+from . import kd_training
 from .evaluate_protocol import aggregate, atomic_json
 
 
@@ -176,9 +177,13 @@ def verify_tokenizer_manifest(path, model):
 def checkpoint_training_identity(payload, config, frozen_io):
     """Validate final training state and return the common four-arm contract."""
     protocol = payload.get("protocol")
-    if protocol not in (LEGACY_PROTOCOL, SCRATCH_PROTOCOL):
+    if protocol not in (LEGACY_PROTOCOL, SCRATCH_PROTOCOL, kd_training.PROTOCOL):
         raise ValueError("unsupported loop memory training protocol")
-    scratch = protocol == SCRATCH_PROTOCOL
+    scratch = protocol in (SCRATCH_PROTOCOL, kd_training.PROTOCOL)
+    if protocol == kd_training.PROTOCOL:
+        kd_training.validate_objective(payload.get("objective"), config["depth"])
+    elif payload.get("objective") is not None:
+        raise ValueError("CE checkpoint must not contain a KD objective")
     if payload.get("from_scratch", False) is not scratch:
         raise ValueError("checkpoint protocol and from_scratch flag disagree")
     epochs, offset = (4, 0) if scratch else (2, 4)
@@ -219,7 +224,7 @@ def checkpoint_training_identity(payload, config, frozen_io):
                 or any(c not in "0123456789abcdef" for c in fingerprint)):
             raise ValueError("scratch initialization seed or state fingerprint is invalid")
     return {"protocol": protocol, "from_scratch": scratch, "parent": parent, "initialization": initialization,
-            "settings": settings, "execution_plan": payload.get("execution_plan"), "sampling_epoch_offset": offset, "cursor": cursor,
+            "settings": settings, "objective": payload.get("objective"), "execution_plan": payload.get("execution_plan"), "sampling_epoch_offset": offset, "cursor": cursor,
             "config_except_memory_mode": {k: v for k, v in config.items() if k != "memory_mode"},
             "training_requests": len(entries),
             "data_index_sha256": hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
@@ -234,6 +239,7 @@ def require_matching_training_identity(reference, actual):
         "parent": "same SSD baseline parent",
         "initialization": "same scratch initialization identity",
         "settings": "same training settings and budget",
+        "objective": "same loss and anchor sampling objective",
         "execution_plan": "same microbatch execution schedule",
         "config_except_memory_mode": "same drafter configuration except memory_mode",
         "training_requests": "same ordered training data",
@@ -246,11 +252,21 @@ def require_matching_training_identity(reference, actual):
             raise ValueError("all loop memory arms must share the " + description)
 
 
+def require_version_comparison_identity(reference, actual):
+    """Compare complete recipes while keeping architecture, data and seed fixed."""
+    for field in ('initialization', 'config_except_memory_mode', 'data_index_sha256', 'frozen_io'):
+        if reference[field] != actual[field]:
+            raise ValueError('version comparison changed ' + field)
+    if not reference['from_scratch'] or not actual['from_scratch']:
+        raise ValueError('version comparison requires scratch checkpoints')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--prompts", required=True)
     parser.add_argument("--checkpoints", nargs="+")
+    parser.add_argument("--version-checkpoints", help="JSON mapping version names to final checkpoints; compares complete recipes")
     for mode in METHODS[1:]:
         parser.add_argument("--" + mode.replace("_", "-") + "-checkpoint")
     parser.add_argument("--tokenizer-manifest", help="frozen sources.json with tokenizer.files identities")
@@ -268,8 +284,17 @@ def main(argv=None):
     if args.checkpoints and any(named):
         raise ValueError("use either --checkpoints or all four named checkpoint flags")
     paths = args.checkpoints or named
-    if len(paths) != 4 or not all(paths):
+    versions = None
+    if args.version_checkpoints:
+        if args.checkpoints or any(named):
+            raise ValueError('version mapping cannot be combined with four-arm flags')
+        versions = json.loads(Path(args.version_checkpoints).read_text())
+        if not isinstance(versions, dict) or len(versions) < 1 or 'ar' in versions or any(not k or not isinstance(v, str) for k, v in versions.items()):
+            raise ValueError('invalid version checkpoint mapping')
+        paths = list(versions.values())
+    elif len(paths) != 4 or not all(paths):
         raise ValueError("provide exactly four loop memory checkpoints")
+    methods = ('ar', *versions) if versions else METHODS
     verify_tokenizer_manifest(args.tokenizer_manifest, args.model)
     if min(args.max_new_tokens, args.max_prompt_tokens, args.num_threads) < 1:
         raise ValueError("evaluation counts must be positive")
@@ -295,7 +320,7 @@ def main(argv=None):
         snapshot.write_text("".join(json.dumps(p, ensure_ascii=False) + "\n" for p in prompts))
     config = vars(args) | {"target_dtype": "float32", "target_rounds": 4,
                            "feature_dtype": "bfloat16", "decoding": "greedy",
-                           "batch_size": 1, "methods": list(METHODS),
+                           "batch_size": 1, "methods": list(methods),
                            "method_order": "cyclic rotation per shuffled prompt",
                            "checkpoint_selection": "fixed final training epoch; no evaluation-based selection"}
     config_path = root / "config.json"
@@ -308,7 +333,7 @@ def main(argv=None):
     if len(completed) != len(records):
         raise ValueError("duplicate evaluation records")
     prompt_sources = {p["id"]: p["source"] for p in prompts}
-    if any(prompt_sources.get(r["id"]) != r["source"] or r["method"] not in METHODS for r in records):
+    if any(prompt_sources.get(r["id"]) != r["source"] or r["method"] not in methods for r in records):
         raise ValueError("existing evaluation rows do not belong to this panel")
 
     hardware_path = root / "hardware.json"
@@ -323,26 +348,30 @@ def main(argv=None):
     eos_ids = set(eos if isinstance(eos, list) else ([] if eos is None else [eos]))
     drafts, checkpoints = {}, {}
     training_identity = None
-    for path in paths:
+    version_identities = {}
+    for path_index, path in enumerate(paths):
         draft, payload = load_loop_memory_checkpoint(path, frozen_io_path=args.frozen_io, device=args.device)
-        mode = draft.config.memory_mode
-        if mode not in METHODS[1:] or mode in drafts:
+        mode = list(versions)[path_index] if versions else draft.config.memory_mode
+        if mode not in methods[1:] or mode in drafts:
             raise ValueError("provide one checkpoint per loop memory mode")
         identity = checkpoint_training_identity(payload, draft.config.dict(), args.frozen_io)
         if training_identity is None:
             training_identity = identity
         else:
-            require_matching_training_identity(training_identity, identity)
+            (require_version_comparison_identity if versions else require_matching_training_identity)(training_identity, identity)
+        version_identities[mode] = identity
         drafts[mode] = draft.eval()
         stat = Path(path).stat()
         checkpoints[mode] = {"path": str(Path(path).resolve()), "cursor": payload["cursor"],
                              "config": draft.config.dict(), "file_size": stat.st_size,
                              "mtime_ns": stat.st_mtime_ns}
         del payload
-    if set(drafts) != set(METHODS[1:]):
+    if set(drafts) != set(methods[1:]):
         raise ValueError("evaluation requires none, final, final_capacity and trajectory checkpoints")
     if previous_hardware and previous_hardware["checkpoints"] != checkpoints:
         raise ValueError("checkpoint identity changed since the previous evaluation records")
+    if versions:
+        training_identity = version_identities
     if previous_hardware and previous_hardware.get("training_identity", training_identity) != training_identity:
         raise ValueError("training protocol identity changed since the previous evaluation records")
     order = list(prompts)
@@ -358,7 +387,7 @@ def main(argv=None):
         return decode_loop_memory_speculative(target, drafts[method], ids, budget, eos_ids)
 
     warmup = encoded[order[0]["id"]].to(args.device)
-    for method in METHODS:
+    for method in methods:
         run(method, warmup, min(8, args.max_new_tokens))
     session = {"started_at": datetime.now(timezone.utc).isoformat(),
                "cuda_visible_devices": visible_devices, "device": args.device}
@@ -372,8 +401,8 @@ def main(argv=None):
     with results_path.open("a") as stream:
         for index, entry in enumerate(order):
             ids = encoded[entry["id"]].to(args.device)
-            offset = index % len(METHODS)
-            for method in METHODS[offset:] + METHODS[:offset]:
+            offset = index % len(methods)
+            for method in methods[offset:] + methods[:offset]:
                 if (entry["id"], method) in completed:
                     continue
                 result = run(method, ids, args.max_new_tokens)
@@ -386,7 +415,7 @@ def main(argv=None):
                 records.append(row)
                 completed.add((entry["id"], method))
                 progress = {"completed_method_requests": len(completed),
-                            "total_method_requests": len(prompts) * len(METHODS),
+                            "total_method_requests": len(prompts) * len(methods),
                             "last_id": entry["id"], "last_method": method, "updated_at": row["finished_at"]}
                 atomic_json(root / "progress.json", progress)
                 print(json.dumps(progress), flush=True)

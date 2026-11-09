@@ -18,6 +18,7 @@ import torch
 import torch.distributed as dist
 from torch.nn import functional as F
 
+from . import kd_training
 from .draft import load_frozen_io
 from .loop_memory_draft import (LoopMemoryConfig, LoopMemoryDraft, fork_from_ssd,
                                 load_loop_memory_checkpoint, make_loop_memory_batch)
@@ -58,7 +59,7 @@ def initial_state_hash(state):
 
 
 def validate_initialization(payload, from_scratch):
-    expected_protocol = SCRATCH_PROTOCOL if from_scratch else PROTOCOL
+    expected_protocol = (kd_training.PROTOCOL if payload.get("objective") is not None else SCRATCH_PROTOCOL) if from_scratch else PROTOCOL
     if (payload.get("protocol") != expected_protocol
             or payload.get("from_scratch", False) != from_scratch):
         raise ValueError("resume initialization mode differs; scratch runs require --from-scratch")
@@ -141,7 +142,7 @@ def synchronized_gradients(model, requests, microbatch, device):
 
 
 def save_training_checkpoint(path, model, optimizer, cursor, settings, entries, frozen_io,
-                             sampling_epoch_offset, parent, from_scratch=False, initialization=None, execution_plan=None):
+                             sampling_epoch_offset, parent, from_scratch=False, initialization=None, execution_plan=None, objective=None):
     rank, world_size = distributed_context()
     device = next(model.parameters()).device
     rng = dict(torch_rng=torch.get_rng_state(), python_rng=random.getstate())
@@ -152,9 +153,9 @@ def save_training_checkpoint(path, model, optimizer, cursor, settings, entries, 
         rank_rng = [None] * world_size
         dist.all_gather_object(rank_rng, rng)
     if rank == 0:
-        payload = dict(schema=SCHEMA, protocol=SCRATCH_PROTOCOL if from_scratch else PROTOCOL,
+        payload = dict(schema=SCHEMA, protocol=(kd_training.PROTOCOL if objective is not None else SCRATCH_PROTOCOL) if from_scratch else PROTOCOL,
                        from_scratch=from_scratch, run_directory=str(Path(path).parent.resolve()),
-                       initialization=initialization, execution_plan=execution_plan,
+                       initialization=initialization, execution_plan=execution_plan, objective=objective,
                        config=model.config.dict(),
                        model=model.state_dict(), optimizer=optimizer.state_dict(), cursor=dict(cursor),
                        settings=asdict(settings), data_index=entries,
@@ -206,7 +207,7 @@ def restore_training_state(payload, optimizer, settings, entries, device, sampli
 
 def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=None,
                  sampling_epoch_offset=None, parent=None, save_every=50, stop_after_steps=0,
-                 from_scratch=False, execution_plan=None):
+                 from_scratch=False, execution_plan=None, objective=None):
     """Train a randomly initialized or legacy arm from its next committed update."""
     if sampling_epoch_offset is None:
         sampling_epoch_offset = 0 if from_scratch else 4
@@ -227,6 +228,14 @@ def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=Non
             raise ValueError('resume microbatch execution schedule changed')
         elif prior_plan is None and resume_payload['cursor']['step'] > execution_plan['from_step']:
             raise ValueError('cannot introduce an execution schedule retroactively')
+    if resume_payload is not None:
+        saved_objective = resume_payload.get('objective')
+        if objective != saved_objective:
+            raise ValueError('resume training objective or anchor sampling changed')
+    if objective is not None:
+        if not from_scratch:
+            raise ValueError('KD requires a fresh scratch experiment')
+        kd_training.validate_objective(objective, model.config.depth)
     execution_microbatch(settings, execution_plan, 0)
     rank, world_size = distributed_context()
     primary = rank == 0
@@ -271,13 +280,13 @@ def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=Non
                 initialization = identity[0]
         if primary:
             write_json(out / "config.json", dict(
-                protocol=SCRATCH_PROTOCOL if from_scratch else PROTOCOL, from_scratch=from_scratch,
-                initialization=initialization,
+                protocol=(kd_training.PROTOCOL if objective is not None else SCRATCH_PROTOCOL) if from_scratch else PROTOCOL, from_scratch=from_scratch,
+                initialization=initialization, objective=objective,
                 run_directory=str(out.resolve()), config=model.config.dict(), settings=asdict(settings),
                 sampling_epoch_offset=sampling_epoch_offset, parent=parent, optimizer_initialization="fresh_AdamW",
                 total_steps=total_steps, requests=len(entries),
                 distributed=dict(world_size=world_size, gradient_reduction="sum_global_label_normalized"),
-                loss="uniform_ce_over_all_valid_child_labels_in_update",
+                loss="weighted_topk_tail_kd_global_update" if objective else "uniform_ce_over_all_valid_child_labels_in_update",
                 frozen_io=str(Path(frozen_io).resolve()),
                 trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad)))
             write_json(out / "data_index.json", entries)
@@ -287,7 +296,7 @@ def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=Non
 
     def save(name):
         save_training_checkpoint(out / name, model, optimizer, cursor, settings, entries,
-                                 frozen_io, sampling_epoch_offset, parent, from_scratch, initialization, execution_plan)
+                                 frozen_io, sampling_epoch_offset, parent, from_scratch, initialization, execution_plan, objective)
 
     if resume_payload is None:
         save("initial.pt")
@@ -307,14 +316,16 @@ def train_epochs(model, entries, settings, out, frozen_io, *, resume_payload=Non
         order = epoch_order(len(entries), settings.seed, sampling_epoch)
         start = cursor["next_request"]
         indices = order[start:start + settings.requests_per_update]
-        requests = prepare_requests(entries, shard_indices(indices, rank, world_size), settings, sampling_epoch)
+        prepare = kd_training.prepare_requests if objective is not None else prepare_requests
+        requests = prepare(entries, shard_indices(indices, rank, world_size), settings, sampling_epoch)
         optimizer.zero_grad(set_to_none=True)
         lr = learning_rate(cursor["step"] + 1, total_steps, settings)
         for group in optimizer.param_groups:
             group["lr"] = lr
         tick = time.monotonic()
         physical_microbatch = execution_microbatch(settings, execution_plan, cursor["step"])
-        stats = synchronized_gradients(model, requests, physical_microbatch, device)
+        stats = (kd_training.synchronized_gradients(model, requests, physical_microbatch, device, objective)
+                 if objective is not None else synchronized_gradients(model, requests, physical_microbatch, device))
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip, error_if_nonfinite=True)
         optimizer.step()
         end = start + len(indices)
@@ -365,6 +376,7 @@ def parser():
     initialization.add_argument("--from-scratch", action="store_true", help="random drafter weights; reuse only frozen target I/O")
     p.add_argument("--index-file", help="validated baseline data_index.json with sibling config.json")
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--objective-config", help="registered KD objective JSON; omitted retains CE v1")
     p.add_argument("--epochs", type=int, default=None, help="scratch default 4; legacy default 2")
     p.add_argument("--sampling-epoch-offset", type=int, default=None, help="scratch default 0; legacy default 4")
     p.add_argument("--requests-per-update", type=int, default=8)
@@ -477,7 +489,8 @@ def _run(args, settings, device):
     return train_epochs(model, entries, settings, args.out, args.frozen_io, resume_payload=payload,
                         sampling_epoch_offset=args.sampling_epoch_offset, parent=parent,
                         save_every=args.save_every, stop_after_steps=args.stop_after_steps,
-                        from_scratch=args.from_scratch, execution_plan=execution_plan)
+                        from_scratch=args.from_scratch, execution_plan=execution_plan,
+                        objective=json.loads(Path(args.objective_config).read_text()) if args.objective_config else None)
 
 
 if __name__ == "__main__":

@@ -110,3 +110,5 @@ python -m scripts.loop_drafter.auto_train_when_ready \
 采集执行优化的实测结果见 [测速记录](docs/capture-performance.md)。
 
 本轮 v1 已登记统一的训练执行优化：完成 6,400 步后，四个方案将物理 microbatch 从 16 切换为 64；全局更新预算不变。新服务器复现需在开训前复制 [执行调度文件](scripts/loop_drafter/training_execution_v1.json)，详见 [训练执行说明与测速](docs/training-execution.md)。
+
+单版本 KD 训练入口现已提供：保留 trajectory v1，纯 KD、首位置两倍权重、128-anchor 跨 epoch 轮换覆盖，从头训练并自动进行固定面板的 AR／原 CE／新 KD 配对评测。运行与预算说明见 [KD 训练协议](docs/kd-training-v1.md)。
