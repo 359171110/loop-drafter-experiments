@@ -4,7 +4,7 @@ Ouro-1.4B 四轮 loop target 的独立 drafter 实验代码。当前冻结架构
 
 ## 当前状态
 
-包含模型、训练、评测、数据准备工具、多卡调度、空闲 GPU 自动训练入口及 CPU 测试。新版 16K 提示已在原实验环境冻结，但完整新版轨迹尚未采集完成。现有 `capture*.py` 保留历史采集实现；遵守新版 frozen input_ids、raw completion 与长度分档的采集适配器仍需补齐，不能直接把历史采集命令当作新版数据流水线。
+包含模型、训练、评测、数据准备工具、多卡调度、空闲 GPU 自动训练入口及 CPU 测试。新版 16K 提示已在原实验环境冻结，`capture_v2.py` 已支持 frozen input_ids、多卡分片、长度分档、显存实测、断点恢复和完整数据发布。新版轨迹正在采集；其他 `capture*.py` 为历史采集实现。
 
 Git 仓库仅存代码和协议。目标模型、冻结提示、轨迹、frozen_io 和 checkpoint 需另行传输；克隆仓库本身不会启动任务。
 
@@ -53,6 +53,15 @@ evaluation_reasoning_v1/sources.json
 ```
 
 还需复制 manifest 引用的全部轨迹文件，以及数据选择、重叠排查和采集计划等审计材料。完整 16K 轨迹尚未就绪时不能训练。
+
+已有冻结提示、reserves、capture_plan、sources、overlap_report、reserves_sources 及旧 EOS 轨迹时，可启动新版多卡采集：
+
+```bash
+python -m scripts.loop_drafter.capture_v2 --root /experiments/loop_drafter \
+  --protocol local/protocol.json --gpus 0,1,2,3
+```
+
+按实际空闲卡指定 GPU；启动器检查已有计算进程并持有项目 GPU lease。每卡先实测各长度档的显存，随后采集分片。重启须保持 GPU 列表及冻结输入不变，已有分片可恢复。只有全部分片完成并验证后才发布 canonical manifest/index/config，原训练等待器随后可自动开训。采集状态见 `data_v2/capture/status.json`，各卡进度见 `worker_*/status.json`。
 
 **跨服务器请优先保留原材料的绝对路径**（可用挂载或软链接），并让 `--root`、`--model` 对应实际路径。`configure.py` 只改 recipe，不迁移数据内部路径。评测条目中的 `tokenizer_path`、sources 中的文件身份、轨迹 index 中的绝对路径和 mtime 都会校验；普通复制到另一目录后直接运行可能失败。迁移应保留时间戳，并在正式训练前通过 runner 校验。若必须重定位，应单独重建路径元数据及对应身份，保留原提示、input_ids、顺序与审计记录；仓库目前没有自动重定位工具。
 
