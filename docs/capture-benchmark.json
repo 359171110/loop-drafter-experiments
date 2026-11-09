@@ -1,0 +1,94 @@
+[
+  {
+    "method": "baseline",
+    "prompt_length": 100,
+    "batch": 4,
+    "tokens": 512,
+    "seconds": 24.117438525892794,
+    "token_identity": true,
+    "hidden_max_abs": 0.0,
+    "generated_lengths": [
+      346,
+      512,
+      269,
+      162
+    ],
+    "peak_allocated": 9818988544,
+    "peak_reserved": 15860760576
+  },
+  {
+    "method": "graph",
+    "prompt_length": 100,
+    "batch": 4,
+    "tokens": 512,
+    "seconds": 17.84631546959281,
+    "token_identity": true,
+    "hidden_max_abs": 0.0,
+    "generated_lengths": [
+      346,
+      512,
+      269,
+      162
+    ],
+    "peak_allocated": 10021470208,
+    "peak_reserved": 15896412160
+  },
+  {
+    "method": "baseline",
+    "prompt_length": 975,
+    "batch": 2,
+    "tokens": 512,
+    "seconds": 29.206011884845793,
+    "token_identity": true,
+    "hidden_max_abs": 0.0,
+    "generated_lengths": [
+      512,
+      512
+    ],
+    "peak_allocated": 10777907200,
+    "peak_reserved": 18870173696
+  },
+  {
+    "method": "graph",
+    "prompt_length": 975,
+    "batch": 2,
+    "tokens": 512,
+    "seconds": 26.041289943270385,
+    "token_identity": true,
+    "hidden_max_abs": 0.0,
+    "generated_lengths": [
+      512,
+      512
+    ],
+    "peak_allocated": 11001534976,
+    "peak_reserved": 19044237312
+  },
+  {
+    "method": "baseline",
+    "prompt_length": 1886,
+    "batch": 1,
+    "tokens": 512,
+    "seconds": 34.464997770264745,
+    "token_identity": true,
+    "hidden_max_abs": 0.0,
+    "generated_lengths": [
+      512
+    ],
+    "peak_allocated": 9864261120,
+    "peak_reserved": 11576279040
+  },
+  {
+    "method": "graph",
+    "prompt_length": 1886,
+    "batch": 1,
+    "tokens": 512,
+    "seconds": 31.92154104076326,
+    "token_identity": true,
+    "hidden_max_abs": 0.0,
+    "generated_lengths": [
+      512
+    ],
+    "peak_allocated": 10083483136,
+    "peak_reserved": 11611930624
+  }
+]

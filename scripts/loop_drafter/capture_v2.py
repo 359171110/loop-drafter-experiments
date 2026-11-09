@@ -161,7 +161,16 @@ def capture_retry(target, ids, eos):
     return capture_retry(target, ids[:middle], eos) + capture_retry(target, ids[middle:], eos)
 
 
-def worker(root, index):
+def worker(root, index, backend='reference'):
+    global capture_batch
+    if backend == 'graph':
+        from .capture_fast import capture_batch_graph
+        capture_batch = capture_batch_graph
+    elif backend == 'buffered':
+        from .capture_fast import capture_batch_fast
+        capture_batch = capture_batch_fast
+    elif backend != 'reference':
+        raise ValueError('unknown capture backend')
     out = root / 'data_v2/capture'
     plan = json.loads((out / 'plan.json').read_text())
     check_plan(plan)
@@ -190,22 +199,29 @@ def worker(root, index):
         rejected = _journal(folder / 'rejected.jsonl')
         used = {r['id'] for r in done + rejected}
         started = time.monotonic()
+        initial_done = len(done)
+        generation_seconds = write_seconds = 0.
         def progress(state='capturing'):
             write_status(folder / 'status.json', state=state, done=len(done), total=len(tasks),
-                         gpu=spec['gpu'], elapsed_seconds=time.monotonic()-started)
-        def save(item, prompt, tokens, hidden):
+                         gpu=spec['gpu'], backend=backend, initial_done=initial_done,
+                         session_completed=len(done)-initial_done, generation_seconds=generation_seconds,
+                         write_seconds=write_seconds, elapsed_seconds=time.monotonic()-started)
+        def save(item, prompt, tokens, hidden, captured_backend=None):
+            nonlocal write_seconds
+            write_started = time.monotonic()
             original = item['record']
             path = folder / 'trajectories' / f"{item['slot']:06d}.pt"
             row = dict(id=prompt['id'], source=prompt['source'], domain=prompt['domain'], split='train',
                        slot=item['slot'], original_id=original['id'], path=str(path),
                        prompt_length=len(prompt['input_ids']), generated_length=len(tokens)-len(prompt['input_ids']),
                        terminal='native_eos' if int(tokens[-1]) in eos else 'cap512_non_eos',
-                       input_ids_sha256=prompt['input_ids_sha256'])
+                       input_ids_sha256=prompt['input_ids_sha256'], capture_backend=captured_backend or backend)
             payload = row | dict(token_ids=tokens, round_hidden=hidden)
             validate_trajectory(payload, prompt, eos)
             _atomic_torch(path, payload)
             _append(folder / 'manifest.jsonl', row)
             done.append(row); completed.add(item['slot']); used.add(prompt['id'])
+            write_seconds += time.monotonic() - write_started
         # Recovery of a completed tensor whose journal append was interrupted.
         for item in tasks:
             path = folder / 'trajectories' / f"{item['slot']:06d}.pt"
@@ -214,7 +230,7 @@ def worker(root, index):
                 if value['original_id'] != item['record']['id'] or value['id'] not in candidates:
                     raise ValueError('orphan trajectory identity changed')
                 prompt = candidates[value['id']]
-                save(item, prompt, value['token_ids'], value['round_hidden'])
+                save(item, prompt, value['token_ids'], value['round_hidden'], value.get('capture_backend', 'reference'))
         pending = [t for t in tasks if t['slot'] not in completed]
         # Validate each length tier at its largest prompt before full production.
         probes = {}
@@ -243,7 +259,9 @@ def worker(root, index):
             for offset in range(0, len(buckets[length]), size):
                 group = buckets[length][offset:offset+size]
                 ids = torch.cat([encode_prompt(target.tokenizer, x['record'], 2048) for x in group]).cuda()
+                batch_started = time.monotonic()
                 outputs = capture_retry(target, ids, eos)
+                generation_seconds += time.monotonic() - batch_started
                 for item, (tokens, hidden) in zip(group, outputs):
                     prompt = item['record']
                     while len(tokens) - len(prompt['input_ids']) < 2:
@@ -326,7 +344,7 @@ def finalize(root, plan):
     _atomic_json(out / 'summary.json', dict(complete=True, records=len(rows), reused=plan['reuse'], domains=totals))
 
 
-def supervise(root, protocol, gpus):
+def supervise(root, protocol, gpus, backend='reference'):
     out = root / 'data_v2/capture'
     out.mkdir(parents=True, exist_ok=True)
     children = []
@@ -346,15 +364,17 @@ def supervise(root, protocol, gpus):
                 log = stack.enter_context((folder/'worker.log').open('a'))
                 env = dict(os.environ, CUDA_VISIBLE_DEVICES=spec['gpu'], OMP_NUM_THREADS='4', MKL_NUM_THREADS='4')
                 child = subprocess.Popen([sys.executable, '-u', '-m', 'scripts.loop_drafter.capture_v2',
-                        '--phase','worker','--root',str(root),'--worker',str(spec['index'])], env=env,
+                        '--phase','worker','--root',str(root),'--worker',str(spec['index']),'--backend',backend], env=env,
                         cwd=Path(__file__).resolve().parents[2], stdout=log, stderr=subprocess.STDOUT)
                 children.append(child)
+            _append(out/'execution_sessions.jsonl', dict(started_unix=time.time(), backend=backend,
+                    gpus=gpus, worker_pids=[c.pid for c in children]))
             while any(c.poll() is None for c in children):
                 failed = [c for c in children if c.poll() not in (None,0)]
                 if failed:
                     raise RuntimeError(f'capture worker failed: {[c.pid for c in failed]}; see worker.log')
                 write_status(out/'status.json', state='capturing', gpus=gpus, worker_pids=[c.pid for c in children],
-                             pending=plan['pending'], reused=plan['reuse'])
+                             pending=plan['pending'], reused=plan['reuse'], backend=backend)
                 time.sleep(10)
             if any(c.returncode for c in children):
                 raise RuntimeError('capture worker failed')
@@ -379,13 +399,14 @@ def main():
     parser.add_argument('--phase', choices=['run','worker'], default='run')
     parser.add_argument('--gpus', default='0,2,3,4,5,6,7')
     parser.add_argument('--worker', type=int)
+    parser.add_argument('--backend', choices=['reference','buffered','graph'], default='reference')
     args = parser.parse_args()
-    if args.phase == 'worker': worker(args.root.resolve(), args.worker)
+    if args.phase == 'worker': worker(args.root.resolve(), args.worker, args.backend)
     else:
         gpus = args.gpus.split(',')
         if not gpus or len(set(gpus)) != len(gpus) or any(not g.isdigit() for g in gpus):
             raise ValueError('GPU indices must be unique integers')
-        supervise(args.root.resolve(), args.protocol.resolve(), gpus)
+        supervise(args.root.resolve(), args.protocol.resolve(), gpus, args.backend)
 
 
 if __name__ == '__main__':

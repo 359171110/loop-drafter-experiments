@@ -61,7 +61,9 @@ python -m scripts.loop_drafter.capture_v2 --root /experiments/loop_drafter \
   --protocol local/protocol.json --gpus 0,1,2,3
 ```
 
-按实际空闲卡指定 GPU；启动器检查已有计算进程并持有项目 GPU lease。每卡先实测各长度档的显存，随后采集分片。重启须保持 GPU 列表及冻结输入不变，已有分片可恢复。只有全部分片完成并验证后才发布 canonical manifest/index/config，原训练等待器随后可自动开训。采集状态见 `data_v2/capture/status.json`，各卡进度见 `worker_*/status.json`。
+按实际空闲卡指定 GPU；启动器检查已有计算进程并持有项目 GPU lease。可添加 `--backend graph` 启用采集专用 CUDA Graph 解码；默认 `reference` 保留原实现。Graph 方式仍使用 FP32 四轮 target、冻结 input_ids、原长度分档和 EOS/512，并保留逐条 BF16 特征。它预分配 KV、每 128 个 decode 位置调整注意力范围，并在请求结束时集中传回特征。每卡先实测各长度档的显存，随后采集分片。重启须保持 GPU 列表及冻结输入不变，已有分片可恢复。只有全部分片完成并验证后才发布 canonical manifest/index/config，原训练等待器随后可自动开训。采集状态见 `data_v2/capture/status.json`，各卡进度见 `worker_*/status.json`。切换 backend 前停止当前采集 supervisor，让它关闭自己的 worker，再用相同 GPU 列表恢复；已有轨迹不会重采。`execution_sessions.jsonl` 与新增轨迹元数据记录实际 backend。
+
+`benchmark_capture.py --graph-only --production-check --tokens 512` 可在独占 GPU 上对比原实现和 graph 实现；还需传入 `--model`、某个冻结 worker 的 `--tasks` 和 `--out`。它只写测速报告，不写训练轨迹。
 
 **跨服务器请优先保留原材料的绝对路径**（可用挂载或软链接），并让 `--root`、`--model` 对应实际路径。`configure.py` 只改 recipe，不迁移数据内部路径。评测条目中的 `tokenizer_path`、sources 中的文件身份、轨迹 index 中的绝对路径和 mtime 都会校验；普通复制到另一目录后直接运行可能失败。迁移应保留时间戳，并在正式训练前通过 runner 校验。若必须重定位，应单独重建路径元数据及对应身份，保留原提示、input_ids、顺序与审计记录；仓库目前没有自动重定位工具。
 
@@ -104,3 +106,5 @@ python -m scripts.loop_drafter.auto_train_when_ready \
 - `run_loop_memory_experiment.py` / `auto_train_when_ready.py`：协议校验、多卡运行与自动等待。
 - `prepare_data_v2.py`：数据准备；依赖本地源数据和历史冻结材料，不会自动下载完整数据集。
 - `scripts/fest_hybrid`、`scripts/fest_hybrid_prefix_tree`：主干依赖。
+
+采集执行优化的实测结果见 [测速记录](docs/capture-performance.md)。
